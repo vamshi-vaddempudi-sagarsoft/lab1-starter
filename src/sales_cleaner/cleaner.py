@@ -121,8 +121,48 @@ def clean_row(raw: dict[str, str], source_line: int) -> CleanRow | RejectedRow:
     Returns a CleanRow or a RejectedRow — never raises, and never returns None.
     A union return type keeps the caller honest: they have to handle both.
     """
-    # TODO: implement. See the tests for the exact behaviour required.
-    raise NotImplementedError
+    order_id = normalise_text(raw.get("order_id"))
+    if order_id is None:
+        return RejectedRow(source_line, "missing order_id", raw)
+
+    order_date = parse_date(raw.get("order_date"))
+    if order_date is None:
+        return RejectedRow(source_line, "unparseable or missing order_date", raw)
+
+    customer_name = normalise_text(raw.get("customer_name"), title_case=True)
+    if customer_name is None:
+        return RejectedRow(source_line, "missing customer_name", raw)
+
+    region = normalise_text(raw.get("region"), title_case=True)
+    if region is None:
+        return RejectedRow(source_line, "missing region", raw)
+
+    product = normalise_text(raw.get("product"))
+    if product is None:
+        return RejectedRow(source_line, "missing product", raw)
+
+    quantity = parse_int(raw.get("quantity"))
+    if quantity is None:
+        return RejectedRow(source_line, "unparseable or missing quantity", raw)
+    if quantity <= 0:
+        return RejectedRow(source_line, f"quantity must be positive, got {quantity}", raw)
+
+    unit_price = parse_amount(raw.get("unit_price"))
+    if unit_price is None:
+        return RejectedRow(source_line, "unparseable or missing unit_price", raw)
+    if unit_price < 0:
+        return RejectedRow(source_line, f"unit_price must not be negative, got {unit_price}", raw)
+
+    return CleanRow(
+        order_id=order_id,
+        order_date=order_date,
+        customer_name=customer_name,
+        region=region,
+        product=product,
+        quantity=quantity,
+        unit_price=unit_price,
+    )
+
 
 def deduplicate(rows: Iterable[CleanRow]) -> tuple[list[CleanRow], int]:
     """Keep the latest row per order_id.
@@ -134,8 +174,16 @@ def deduplicate(rows: Iterable[CleanRow]) -> tuple[list[CleanRow], int]:
     Returns (kept_rows, number_removed). Order of the input is preserved for the
     rows that survive, which makes the output diffable between runs.
     """
-    # TODO: implement. See the tests for the exact behaviour required.
-    raise NotImplementedError
+    ordered = list(rows)
+    best_by_id: dict[str, tuple[int, CleanRow]] = {}
+    for position, row in enumerate(ordered):
+        existing = best_by_id.get(row.order_id)
+        if existing is None or row.order_date >= existing[1].order_date:
+            best_by_id[row.order_id] = (position, row)
+
+    kept = [row for _, row in sorted(best_by_id.values(), key=lambda pair: pair[0])]
+    return kept, len(ordered) - len(kept)
+
 
 def clean_rows(raw_rows: Iterable[dict[str, str]], *, first_line: int = 2) -> CleanResult:
     """Clean an iterable of raw rows and deduplicate the survivors.
@@ -144,8 +192,21 @@ def clean_rows(raw_rows: Iterable[dict[str, str]], *, first_line: int = 2) -> Cl
     a rejected row as "line 7" only helps if it matches what the person sees when
     they open the file.
     """
-    # TODO: implement. See the tests for the exact behaviour required.
-    raise NotImplementedError
+    result = CleanResult()
+    candidates: list[CleanRow] = []
+
+    for offset, raw in enumerate(raw_rows):
+        outcome = clean_row(raw, source_line=first_line + offset)
+        if isinstance(outcome, RejectedRow):
+            result.rejected.append(outcome)
+        else:
+            candidates.append(outcome)
+
+    kept, removed = deduplicate(candidates)
+    result.clean = kept
+    result.duplicates_removed = removed
+    return result
+
 
 def read_raw_csv(path: Path) -> Iterator[dict[str, str]]:
     """Read a CSV, normalising headers and tolerating a BOM.
@@ -154,8 +215,24 @@ def read_raw_csv(path: Path) -> Iterator[dict[str, str]]:
     Rows with the wrong number of fields come back with None values, which the
     row validator then rejects with a readable reason.
     """
-    # TODO: implement. See the tests for the exact behaviour required.
-    raise NotImplementedError
+    with path.open(newline="", encoding="utf-8-sig") as handle:
+        reader = csv.DictReader(handle)
+        if reader.fieldnames is None:
+            raise MissingColumnsError(REQUIRED_COLUMNS)
+
+        mapping = {name: _normalise_header(name) for name in reader.fieldnames}
+        present = set(mapping.values())
+        missing = set(REQUIRED_COLUMNS) - present
+        if missing:
+            raise MissingColumnsError(missing)
+
+        for row in reader:
+            yield {
+                mapping[key]: value
+                for key, value in row.items()
+                if key in mapping and value is not None
+            }
+
 
 def clean_file(source: Path) -> CleanResult:
     """Read and clean a CSV file. Thin wrapper so the CLI stays trivial."""
@@ -164,10 +241,28 @@ def clean_file(source: Path) -> CleanResult:
 
 def write_clean_csv(rows: Iterable[CleanRow], destination: Path) -> int:
     """Write clean rows. Returns the count written."""
-    # TODO: implement. See the tests for the exact behaviour required.
-    raise NotImplementedError
+    rows = list(rows)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = [
+        "order_id", "order_date", "customer_name", "region",
+        "product", "quantity", "unit_price", "line_total",
+    ]
+    with destination.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row.as_dict())
+    return len(rows)
+
 
 def write_rejects_csv(rows: Iterable[RejectedRow], destination: Path) -> int:
     """Write rejected rows with their reasons. Returns the count written."""
-    # TODO: implement. See the tests for the exact behaviour required.
-    raise NotImplementedError
+    rows = list(rows)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = ["source_line", "reason", "order_id", "raw"]
+    with destination.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row.as_dict())
+    return len(rows)
